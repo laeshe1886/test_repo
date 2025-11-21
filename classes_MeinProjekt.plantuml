@@ -1,0 +1,182 @@
+@startuml classes_MeinProjekt
+set namespaceSeparator none
+class BruteForceSolver {
+  generator
+  renderer
+  scorer
+  solve(num_pieces: int, positions: list, piece_shapes: dict, target: np.ndarray)
+}
+class Config {
+  data_dir : Path
+  hardware
+  output_dir : Path
+  project_root : Path
+  solver
+  vision
+}
+class CornerFit {
+  corner_position : Tuple[float, float]
+  piece_id : int
+  rotation : float
+  score : float
+}
+class CornerFitter {
+  canvas_height : int
+  canvas_width : int
+  fit_piece_to_corner(piece_id: int, piece_mask: np.ndarray, corner_pos: Tuple[float, float], corner_type: str, target: np.ndarray) -> CornerFit
+  identify_target_corners(target: np.ndarray) -> List[Tuple[float, float, str]]
+  score_corner_fit(rendered: np.ndarray, target: np.ndarray, corner_type: str) -> float
+}
+class CornerQuality  {
+  angle : float
+  angle_score : float
+  bisector_angle : float
+  edge1_straightness : float
+  edge2_straightness : float
+  edge_lengths : Tuple[float, float]
+  overall_score : float
+  position : Tuple[int, int]
+}
+class GuessGenerator {
+  rotation_step : int
+  generate_grid_positions(target: np.ndarray, grid_spacing: int, include_edges: bool) -> List[Tuple[float, float]]
+  generate_guesses(num_pieces: int, target: np.ndarray, max_guesses: int, sample_positions: int, rotation_step: int) -> List[List[dict]]
+}
+class GuessRenderer {
+  height : int
+  piece_colors : list
+  width : int
+  render(guess: List[dict], piece_shapes: Dict[int, np.ndarray]) -> np.ndarray
+  render_color(guess: List[dict], piece_shapes: Dict[int, np.ndarray]) -> np.ndarray
+}
+class HardwareConfig {
+  baud_rate : int
+  enabled : bool
+  serial_port : str
+}
+class IterativeSolution {
+  all_guesses : Optional[List[List[dict]]]
+  anchor_fit : Optional[CornerFit]
+  iteration : int
+  remaining_placements : List[dict]
+  score : float
+  success : bool
+  total_iterations : int
+}
+class IterativeSolver {
+  all_guesses : list
+  all_scores : list
+  corner_fitter
+  guess_generator
+  renderer
+  scorer
+  solve_iteratively(piece_shapes: Dict[int, np.ndarray], piece_corner_info: Dict[int, PieceCornerInfo], target: np.ndarray, score_threshold: float, max_iterations: int) -> IterativeSolution
+}
+class MockPuzzleGenerator {
+  a4_height : int
+  a4_width : int
+  output_dir : Path
+  generate_puzzle() -> tuple
+  generate_wavy_cut(start: tuple, end: tuple, num_waves: int, amplitude: int) -> np.ndarray
+  load_pieces_for_solver(piece_paths: list) -> tuple
+  save_pieces(piece_images: list) -> list
+}
+class PieceAnalyzer {
+  analyze_all_pieces(piece_shapes: Dict[int, np.ndarray]) -> Dict[int, PieceCornerInfo]
+  analyze_piece(piece_id: int, mask: np.ndarray) -> PieceCornerInfo
+  visualize_corners(mask: np.ndarray, corner_info: PieceCornerInfo) -> np.ndarray
+}
+class PieceCornerInfo {
+  corner_count : int
+  corner_positions : List[Tuple[int, int]]
+  corner_qualities : List[CornerQuality]
+  has_corner : bool
+  piece_center : Tuple[float, float]
+  piece_id : int
+  primary_corner_angle : Optional[float]
+  rotation_to_bottom_right : Optional[float]
+}
+class PipelineResult {
+  duration : float
+  message : str
+  solution : Optional[dict]
+  success : bool
+}
+class PlacementScorer {
+  coverage_reward : float
+  gap_penalty : float
+  overlap_penalty : float
+  score(rendered: np.ndarray, target: np.ndarray) -> float
+}
+class Pose {
+  theta : float
+  x : float
+  y : float
+}
+class PuzzlePiece {
+  confidence : float
+  id : str
+  pick_pose
+  place_pose : Pose | None
+}
+class PuzzlePipeline {
+  config
+  guess_generator
+  logger : NoneType, RootLogger
+  renderer
+  scorer
+  show_ui : bool
+  run() -> PipelineResult
+}
+class SolverConfig {
+  coarse_rotation_step : int
+  max_solve_time : float
+  rotation_step : int
+}
+class SolverVisualizer {
+  best_button : Button
+  clock_event
+  current_guess_index : int
+  image_widget : Image
+  is_running : bool
+  orientation : str
+  pause_button : Button
+  solver_data
+  speed : float
+  speed_down_button : Button
+  speed_label : Label
+  speed_up_button : Button
+  start_button : Button
+  status_label : Label
+  step_button : Button
+  auto_step(dt)
+  pause_visualization(instance)
+  show_best(instance)
+  speed_down(instance)
+  speed_up(instance)
+  start_visualization(instance)
+  step_guess(instance)
+}
+class SolverVisualizerApp {
+  solver_data
+  build()
+}
+class VisionConfig {
+  camera_id : int
+  image_height : int
+  image_width : int
+  min_contour_area : int
+  regenerate_mock : bool
+  threshold_value : int
+}
+
+Config --> HardwareConfig : hardware
+Config --> SolverConfig : solver
+Config --> VisionConfig : vision
+GuessGenerator --* PuzzlePipeline : guess_generator
+GuessGenerator --* BruteForceSolver : generator
+PlacementScorer --* PuzzlePipeline : scorer
+GuessRenderer --* PuzzlePipeline : renderer
+Config --o PuzzlePipeline : config
+
+@enduml

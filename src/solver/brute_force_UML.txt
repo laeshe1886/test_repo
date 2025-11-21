@@ -1,0 +1,9 @@
+@startuml
+class BruteForceSolver {
+    solve()
+        generator
+    renderer
+    scorer
+    __init__()
+}
+@enduml
