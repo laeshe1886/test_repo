@@ -1,12 +1,16 @@
-# src/solver/iterative_solver.py
+"""
+Iterative solver - ORIGINAL LOGIC
+Now reads corner data from enriched PuzzlePiece objects instead of piece_corner_info dict.
+"""
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional
 import cv2
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from src.solver.corner_fitter import CornerFit, CornerFitter
-from src.solver.piece_analyzer import PieceCornerInfo
+from src.utils.pose import Pose
+from src.utils.puzzle_piece import PuzzlePiece
 
 
 @dataclass
@@ -18,38 +22,38 @@ class IterativeSolution:
     score: float
     iteration: int
     total_iterations: int
-    all_guesses: Optional[List[List[dict]]] = None  # NEW: All guesses tried
+    all_guesses: Optional[List[List[dict]]] = None
 
 
 class IterativeSolver:
     """
     Iterative puzzle solver that tries corner pieces one at a time.
+    Updates PuzzlePiece objects with final place_pose.
     
-    Strategy:
-    1. Try each piece that might have a corner
-    2. For each piece, try all 4 corners of the target
-    3. Find exact rotation for that piece at that corner
-    4. Solve remaining pieces
-    5. If score is good enough, we're done. Otherwise, try next piece.
+    ORIGINAL ALGORITHM - Now reads from enriched PuzzlePiece objects.
     """
 
     def __init__(self, renderer, scorer, guess_generator):
         self.renderer = renderer
         self.scorer = scorer
         self.guess_generator = guess_generator
-        self.corner_fitter = None  # Will be created with target
+        self.corner_fitter = None
         self.all_guesses = []
         self.all_scores = []
-        
+    
     def solve_iteratively(self,
-                     piece_shapes: Dict[int, np.ndarray],
-                     piece_corner_info: Dict[int, PieceCornerInfo],
-                     target: np.ndarray,
-                     score_threshold: float = 230000.0,
-                     min_acceptable_score: float = 200000.0,
-                     max_corner_combos: int = 200) -> IterativeSolution:
+                          piece_shapes: Dict[int, np.ndarray],
+                          target: np.ndarray,
+                          puzzle_pieces: list,
+                          score_threshold: float = 220000.0,
+                          min_acceptable_score: float = 50000.0,
+                          max_corner_combos: int = 1000) -> IterativeSolution:
         """
         Try different combinations of corners for each piece.
+        Updates puzzle_pieces with place_pose when solution is found.
+        
+        NOW READS FROM: puzzle_pieces[i].corners (enriched data)
+        INSTEAD OF: piece_corner_info dict
         """
         print("\n🔄 Starting iterative solving...")
         
@@ -60,11 +64,10 @@ class IterativeSolver:
         self.all_guesses = []
         self.all_scores = []
         
-        # Find pieces with corners
+        # Find pieces with corners - READ FROM ENRICHED PUZZLEPIECE OBJECTS
         corner_pieces = [
-            (piece_id, info) 
-            for piece_id, info in piece_corner_info.items() 
-            if info.has_corner and len(info.corner_rotations) > 0
+            piece for piece in puzzle_pieces
+            if piece.has_corner and len(piece.corners) > 0
         ]
         
         if not corner_pieces:
@@ -80,14 +83,14 @@ class IterativeSolver:
             )
         
         print(f"\n  Found {len(corner_pieces)} pieces with corners:")
-        for piece_id, info in corner_pieces:
-            print(f"    Piece {piece_id}: {len(info.corner_rotations)} corners detected")
+        for piece in corner_pieces:
+            print(f"    Piece {piece.id}: {len(piece.corners)} corners detected")
         
-        # Generate all combinations of corner selections
+        # Generate all combinations
         import itertools
         piece_corner_options = []
-        for piece_id, info in corner_pieces:
-            piece_corner_options.append(list(range(len(info.corner_rotations))))
+        for piece in corner_pieces:
+            piece_corner_options.append(list(range(len(piece.corners))))
         
         all_corner_combinations = list(itertools.product(*piece_corner_options))
         total_combos = len(all_corner_combinations)
@@ -97,8 +100,8 @@ class IterativeSolver:
         # Prioritize: try best corners first
         def combo_quality(combo_indices):
             total_quality = 0
-            for (piece_id, info), corner_idx in zip(corner_pieces, combo_indices):
-                total_quality += info.corner_qualities[corner_idx].overall_score
+            for piece, corner_idx in zip(corner_pieces, combo_indices):
+                total_quality += piece.corners[corner_idx].quality
             return total_quality
         
         all_corner_combinations.sort(key=combo_quality, reverse=True)
@@ -114,45 +117,70 @@ class IterativeSolver:
         last_best_score = -float('inf')
         combo_idx = 0
         
-        for combo_idx, corner_indices in enumerate(all_corner_combinations):
-            print(f"\n  === Combination {combo_idx + 1}/{len(all_corner_combinations)} ===")
+        # Adaptive parameters
+        def get_adaptive_params(combo_idx, best_score, min_acceptable_score):
+            if combo_idx < 100:
+                num_guesses = 100 if best_score < min_acceptable_score else 50
+                patience = 30
+                check_interval = 50
+            elif combo_idx < 400:
+                if best_score < min_acceptable_score * 0.5:
+                    num_guesses = 300
+                elif best_score < min_acceptable_score:
+                    num_guesses = 150
+                else:
+                    num_guesses = 75
+                patience = 60
+                check_interval = 30
+            elif combo_idx < 4000:
+                if best_score < min_acceptable_score * 0.5:
+                    num_guesses = 400
+                elif best_score < min_acceptable_score:
+                    num_guesses = 200
+                else:
+                    num_guesses = 50
+                patience = 100
+                check_interval = 20
+            else:
+                if best_score < min_acceptable_score * 0.5:
+                    num_guesses = 500
+                elif best_score < min_acceptable_score:
+                    num_guesses = 250
+                else:
+                    num_guesses = 50
+                patience = 150
+                check_interval = 10
             
-            # Calculate quality of this combination
+            return num_guesses, patience, check_interval
+        
+        for combo_idx, corner_indices in enumerate(all_corner_combinations):
+            num_guesses, patience, check_interval = get_adaptive_params(
+                combo_idx, best_score, min_acceptable_score)
+            
+            print(f"\n  === Combination {combo_idx + 1}/{len(all_corner_combinations)} ===")
+            print(f"  Adaptive params: {num_guesses} guesses, patience={patience}")
+            
             combo_qual = combo_quality(corner_indices)
             print(f"  Corner indices: {corner_indices} (combined quality: {combo_qual:.3f})")
             
-            # Create modified corner info using selected corners
-            modified_corner_info = {}
+            # Build rotation mapping for this combination
+            piece_rotations = {}
             
-            for (piece_id, info), corner_idx in zip(corner_pieces, corner_indices):
-                selected_rotation = info.corner_rotations[corner_idx]
-                selected_quality = info.corner_qualities[corner_idx]
+            for piece, corner_idx in zip(corner_pieces, corner_indices):
+                selected_corner = piece.corners[corner_idx]
+                selected_rotation = selected_corner.rotation_to_align
                 
-                print(f"    Piece {piece_id}: Corner #{corner_idx+1}, quality={selected_quality.overall_score:.3f}, rotation={selected_rotation:.1f}°")
+                print(f"    Piece {piece.id}: Corner #{corner_idx+1}, quality={selected_corner.quality:.3f}, rotation={selected_rotation:.1f}°")
                 
-                modified_corner_info[piece_id] = PieceCornerInfo(
-                    piece_id=piece_id,
-                    has_corner=True,
-                    corner_count=1,
-                    corner_positions=[selected_quality.position],
-                    corner_qualities=[selected_quality],
-                    corner_rotations=[selected_rotation],
-                    primary_corner_angle=None,
-                    rotation_to_bottom_right=selected_rotation,
-                    piece_center=info.piece_center
-                )
+                piece_rotations[int(piece.id)] = selected_rotation
             
-            # Generate MORE guesses per combo - more chances to get non-corner pieces right
-            # Increase attempts dramatically if we haven't reached minimum acceptable score
-            if best_score < min_acceptable_score:
-                num_guesses = 100 if combo_idx < 20 else 50
-            else:
-                num_guesses = 50 if combo_idx < 10 else 20
-            
+            # Generate guesses
             guesses = self._generate_guesses_with_all_corners(
                 piece_shapes,
-                modified_corner_info,
+                corner_pieces,
+                piece_rotations,
                 target,
+                puzzle_pieces,
                 max_guesses=num_guesses
             )
             
@@ -172,7 +200,7 @@ class IterativeSolver:
                 if score > best_score:
                     best_score = score
                     best_guess = guess
-                    no_improvement_count = 0  # Reset counter
+                    no_improvement_count = 0
             
             print(f"  Combo best: {combo_best:.1f}, Overall best: {best_score:.1f}")
             
@@ -180,22 +208,18 @@ class IterativeSolver:
             if best_score <= last_best_score:
                 no_improvement_count += 1
             else:
-                no_improvement_count = 0  # Reset when we improve
+                no_improvement_count = 0
             last_best_score = max(last_best_score, best_score)
             
-            # Early exit if we found a great solution
+            # Early exit
             if best_score >= score_threshold:
                 print(f"\n  🎉 Found solution exceeding threshold ({score_threshold})!")
                 break
             
-            # MORE LENIENT stopping conditions
-            # Only stop early if:
-            # 1. We've tried at least 50 combos
-            # 2. No improvement for 30 consecutive combos
-            # 3. AND we've reached at least the minimum acceptable score
+            # Adaptive stopping
             should_stop_early = (
                 combo_idx >= 50 and
-                no_improvement_count >= 30 and
+                no_improvement_count >= patience and
                 best_score >= min_acceptable_score
             )
             
@@ -204,30 +228,43 @@ class IterativeSolver:
                 print(f"  No improvement for {no_improvement_count} combinations, stopping")
                 break
             
-            # Warn if we're stuck below minimum acceptable score
-            if combo_idx > 0 and combo_idx % 25 == 0 and best_score < min_acceptable_score:
-                print(f"\n  ⚠️  After {combo_idx} combos, best score is {best_score:.1f} (target: {min_acceptable_score:.1f})")
-                print(f"  Continuing search...")
+            # Progress reports
+            if combo_idx > 0 and combo_idx % check_interval == 0:
+                if best_score < min_acceptable_score:
+                    progress_pct = (best_score / min_acceptable_score) * 100
+                    print(f"\n  📊 Progress at {combo_idx} combos:")
+                    print(f"     Best score: {best_score:.1f} ({progress_pct:.1f}% of target)")
+                    print(f"     No improvement streak: {no_improvement_count}")
+                    print(f"     Total guesses tried: {len(self.all_guesses)}")
         
-        # Calculate final values
         total_combinations_tried = combo_idx + 1 if combo_idx >= 0 else 0
         
         print(f"\n🏆 Best solution: score {best_score:.1f}")
         print(f"📊 Tried {total_combinations_tried} corner combinations")
         print(f"📊 Total guesses: {len(self.all_guesses)}")
         
-        # Success criteria
+        # SUCCESS - Update PuzzlePiece objects with place_pose
+        if best_guess:
+            print(f"\n  ✓ Updating PuzzlePiece objects with place_pose...")
+            piece_lookup = {int(p.id): p for p in puzzle_pieces}
+            
+            for placement in best_guess:
+                piece_id = placement['piece_id']
+                if piece_id in piece_lookup:
+                    piece = piece_lookup[piece_id]
+                    piece.place_pose = Pose(
+                        x=placement['x'],
+                        y=placement['y'],
+                        theta=placement['theta']
+                    )
+                    print(f"    Piece {piece_id}: {piece.pick_pose} → {piece.place_pose}")
+        
         success = best_score >= min_acceptable_score
         
         if not success:
             print(f"\n  ❌ Failed to reach minimum acceptable score of {min_acceptable_score:.1f}")
-            if best_score > 50000:
-                print(f"  💡 Score {best_score:.1f} suggests corner pieces might be correct")
-                print(f"     but edge/center pieces are misplaced.")
-                print(f"     The solver tried {total_combinations_tried} corner combinations.")
         elif best_score < score_threshold:
             print(f"\n  ⚠️  Reached acceptable score but not optimal threshold")
-            print(f"     Acceptable: {min_acceptable_score:.1f}, Achieved: {best_score:.1f}, Target: {score_threshold:.1f}")
         
         return IterativeSolution(
             success=success,
@@ -238,390 +275,150 @@ class IterativeSolver:
             total_iterations=len(all_corner_combinations),
             all_guesses=self.all_guesses
         )
-    """"
-    def _try_piece_as_anchor(self,
-                        candidate: PieceCornerInfo,
-                        piece_shapes: Dict[int, np.ndarray],
-                        target: np.ndarray) -> IterativeSolution:
-
-        piece_id = candidate.piece_id
-        piece_mask = piece_shapes[piece_id]
-        
-        # Target is already the extracted region
-        height, width = target.shape
-        
-        print(f"\n  === ANCHOR PLACEMENT (TOP-LEFT COORDS) ===")
-        print(f"  Target size: {width}x{height}")
-        
-        # Use the pre-calculated rotation if available
-        if candidate.has_corner and candidate.rotation_to_bottom_right is not None:
-            initial_rotation = candidate.rotation_to_bottom_right
-            print(f"  Pre-calculated rotation: {initial_rotation:.1f}°")
-            
-            # Rotate and crop the piece
-            rotated_mask = self._rotate_and_crop(piece_mask, initial_rotation)
-            piece_h, piece_w = rotated_mask.shape
-            
-            print(f"  Rotated+cropped piece size: {piece_w}x{piece_h}")
-            
-            # NOW IT'S SIMPLE!
-            # We want the piece's BOTTOM-RIGHT corner at target's BOTTOM-RIGHT corner
-            # Target BR corner is at (width-1, height-1)
-            # Piece BR corner is at (x + piece_w - 1, y + piece_h - 1)
-            # So: x + piece_w - 1 = width - 1
-            #     x = width - piece_w
-            # And: y + piece_h - 1 = height - 1
-            #     y = height - piece_h
-            
-            x = width - piece_w
-            y = height - piece_h
-            
-            print(f"  Placing piece top-left at: ({x}, {y})")
-            print(f"  This puts piece BR at: ({x + piece_w - 1}, {y + piece_h - 1})")
-            print(f"  Target BR corner is at: ({width - 1}, {height - 1})")
-            print(f"  Match: {x + piece_w - 1 == width - 1 and y + piece_h - 1 == height - 1}")
-            print(f"  ==========================================\n")
-            
-            best_fit = CornerFit(
-                piece_id=piece_id,
-                corner_position=(float(x), float(y)),
-                rotation=float(initial_rotation),
-                score=1000.0
-            )
-        else:
-            # No corner detected, do full search
-            print(f"  No corner detected, doing full rotation search")
-            best_fit = self.corner_fitter.fit_piece_to_corner(
-                piece_id,
-                piece_mask,
-                (width - 1, height - 1),
-                'bottom_right',
-                target
-            )
-        
-        # Now solve for remaining pieces
-        remaining_piece_ids = [
-            pid for pid in piece_shapes.keys() 
-            if pid != piece_id
-        ]
-        
-        print(f"  Solving for {len(remaining_piece_ids)} remaining pieces...")
-        
-        # Generate guesses for remaining pieces
-        guesses = self._generate_guesses_with_anchor(
-            best_fit,
-            remaining_piece_ids,
-            piece_shapes,
-            target
-        )
-        
-        print(f"  Testing {len(guesses)} placement combinations...")
-        
-        if len(guesses) == 0:
-            print("  ⚠️  WARNING: No guesses generated!")
-            return IterativeSolution(
-                success=False,
-                anchor_fit=best_fit,
-                remaining_placements=[],
-                score=-float('inf'),
-                iteration=0,
-                total_iterations=1,
-                all_guesses=[]
-            )
-        
-        # Find best placement for remaining pieces
-        best_remaining_score = -float('inf')
-        best_guess = None
-        
-        for i, guess in enumerate(guesses):
-            # Store this guess for visualization
-            self.all_guesses.append(guess)
-            
-            rendered = self.renderer.render(guess, piece_shapes)
-            score = self.scorer.score(rendered, target)
-            
-            # Store score too
-            self.all_scores.append(score)
-            
-            if score > best_remaining_score:
-                best_remaining_score = score
-                best_guess = guess
-            
-            if i % 500 == 0 and i > 0:
-                print(f"    Progress: {i}/{len(guesses)}, best: {best_remaining_score:.1f}")
-        
-        if best_guess:
-            return IterativeSolution(
-                success=best_remaining_score > 0,
-                anchor_fit=best_fit,
-                remaining_placements=best_guess,
-                score=best_remaining_score,
-                iteration=0,
-                total_iterations=1,
-                all_guesses=[]
-            )
-        else:
-            return IterativeSolution(
-                success=False,
-                anchor_fit=best_fit,
-                remaining_placements=[],
-                score=-float('inf'),
-                iteration=0,
-                total_iterations=1,
-                all_guesses=[]
-            )
-"""
+    
     def _generate_guesses_with_all_corners(self,
-                                        piece_shapes: Dict[int, np.ndarray],
-                                        piece_corner_info: Dict[int, PieceCornerInfo],
-                                        target: np.ndarray,
-                                        max_guesses: int = 10) -> List[List[dict]]:
+                                           piece_shapes: Dict[int, np.ndarray],
+                                           corner_pieces: List[PuzzlePiece],
+                                           piece_rotations: Dict[int, float],
+                                           target: np.ndarray,
+                                           all_pieces: List[PuzzlePiece],
+                                           max_guesses: int = 10) -> List[List[dict]]:
         """
-        Generate guesses where ALL pieces with corners are placed in corners.
-        Each corner piece goes to a different corner.
+        Generate guesses where:
+        - Corner pieces are placed in corners
+        - Edge pieces are placed along frame sides (at middle height)
+        - Center pieces are placed randomly
         """
         import random
         
         height, width = target.shape
         
-        print(f"\n  === GENERATING GUESSES WITH ALL CORNER PIECES ===")
-        print(f"  Target size: {width}x{height}")
-        
-        # Find all pieces with corners
-        corner_pieces = [
-            (piece_id, info) 
-            for piece_id, info in piece_corner_info.items() 
-            if info.has_corner and info.rotation_to_bottom_right is not None
-        ]
-        
         if len(corner_pieces) == 0:
-            print("  ⚠️  No corner pieces found!")
             return []
         
         if len(corner_pieces) > 4:
-            print(f"  ⚠️  Found {len(corner_pieces)} corner pieces, but only 4 corners available!")
             corner_pieces = corner_pieces[:4]
         
-        print(f"  Found {len(corner_pieces)} corner pieces: {[p[0] for p in corner_pieces]}")
-        
-        # Define the 4 corners with their rotation offsets from bottom-right
+        # Define the 4 corners
         corners = [
-            ('bottom_right', width, height, 0),      # rotation_to_bottom_right + 0
-            ('bottom_left', 0, height, 270),          # rotation_to_bottom_right + 90
-            ('top_left', 0, 0, 180),                 # rotation_to_bottom_right + 180
-            ('top_right', width, 0, 90),            # rotation_to_bottom_right + 270
+            ('bottom_right', width, height, 0),
+            ('bottom_left', 0, height, 270),
+            ('top_left', 0, 0, 180),
+            ('top_right', width, 0, 90),
         ]
         
-        # Get non-corner pieces
-        corner_piece_ids = {p[0] for p in corner_pieces}
-        non_corner_piece_ids = [
-            pid for pid in piece_shapes.keys() 
-            if pid not in corner_piece_ids
+        # Separate pieces by type
+        corner_piece_ids = {int(p.id) for p in corner_pieces}
+        
+        edge_pieces = []
+        center_pieces = []
+        
+        for p in all_pieces:
+            if int(p.id) in corner_piece_ids:
+                continue
+            
+            # Check if it's an edge piece (has straight edge but no corner)
+            if p.has_straight_edge and len(p.edges) > 0:
+                edge_pieces.append(p)
+            else:
+                center_pieces.append(p)
+        
+        # Define the 4 sides (for edge pieces) - one edge piece per side
+        sides = [
+            ('bottom', 0, height, 0),      # flush bottom, x will be centered
+            ('right', width, 0, 270),      # flush right, y will be centered
+            ('top', 0, 0, 180),            # flush top, x will be centered
+            ('left', 0, 0, 90),            # flush left, y will be centered
         ]
         
-        print(f"  Non-corner pieces: {non_corner_piece_ids}")
+        print(f"    Edge pieces: {len(edge_pieces)}, Center pieces: {len(center_pieces)}")
         
         guesses = []
-        num_permutations = max_guesses
+        tried_permutations = set()
         
-        if len(corner_pieces) <= len(corners):
-            available_corners = corners[:len(corner_pieces)]
-            tried_permutations = set()
+        for _ in range(max_guesses):
+            shuffled_corners = list(corner_pieces)
+            random.shuffle(shuffled_corners)
             
-            for _ in range(num_permutations):
-                shuffled_pieces = list(corner_pieces)
-                random.shuffle(shuffled_pieces)
-                
-                perm_key = tuple(p[0] for p in shuffled_pieces)
-                if perm_key in tried_permutations:
-                    continue
-                tried_permutations.add(perm_key)
-                
-                guess = []
-                
-                # Place each corner piece in a corner
-                for (piece_id, piece_info), (corner_name, corner_x, corner_y, rotation_offset) in zip(shuffled_pieces, available_corners):
-                    # rotation_to_bottom_right tells us how to rotate the ORIGINAL piece to fit bottom-right
-                    # To fit a different corner, just add the offset
-                    rotation = piece_info.rotation_to_bottom_right + rotation_offset
-                    
-                    print(f"    Piece {piece_id} -> {corner_name}:")
-                    print(f"      rotation_to_bottom_right: {piece_info.rotation_to_bottom_right:.1f}°")
-                    print(f"      Additional offset: {rotation_offset}°")
-                    print(f"      Total rotation: {rotation:.1f}°")
-                    
-                    # Rotate from original piece with total rotation
-                    rotated_mask = self._rotate_and_crop(piece_shapes[piece_id], rotation)
-                    piece_h, piece_w = rotated_mask.shape
-                    
-                    print(f"      Piece size after rotation: {piece_w}x{piece_h}")
-                    
-                    # Calculate position based on corner
-                    if corner_name == 'top_left':
-                        x, y = 0, 0
-                    elif corner_name == 'top_right':
-                        x, y = width - piece_w, 0
-                    elif corner_name == 'bottom_left':
-                        x, y = 0, height - piece_h
-                    else:  # bottom_right
-                        x, y = width - piece_w, height - piece_h
-                    
-                    print(f"      Position: ({x}, {y})")
-                    
-                    guess.append({
-                        'piece_id': piece_id,
-                        'x': float(x),
-                        'y': float(y),
-                        'theta': float(rotation)
-                    })
-                
-                # Place remaining non-corner pieces randomly
-                for piece_id in non_corner_piece_ids:
-                    theta = random.choice([0, 90, 180, 270])
-                    
-                    rotated = self._rotate_and_crop(piece_shapes[piece_id], theta)
-                    piece_h, piece_w = rotated.shape
-                    
-                    max_x = max(0, width - piece_w)
-                    max_y = max(0, height - piece_h)
-                    
-                    x = random.uniform(0, max_x)
-                    y = random.uniform(0, max_y)
-                    
-                    guess.append({
-                        'piece_id': piece_id,
-                        'x': x,
-                        'y': y,
-                        'theta': theta
-                    })
-                
-                guess.sort(key=lambda p: p['piece_id'])
-                guesses.append(guess)
-        
-        print(f"  ✓ Generated {len(guesses)} guesses with corner pieces in corners")
-        return guesses
-    def _rotate_and_crop(self, shape: np.ndarray, angle: float) -> np.ndarray:
-        """Rotate and crop shape - matching what the renderer does."""
-        if angle == 0:
-            return shape
+            perm_key = tuple(int(p.id) for p in shuffled_corners)
+            if perm_key in tried_permutations:
+                continue
+            tried_permutations.add(perm_key)
             
-        h, w = shape.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        
-        # Calculate new bounding box
-        cos = np.abs(M[0, 0])
-        sin = np.abs(M[0, 1])
-        new_w = int((h * sin) + (w * cos))
-        new_h = int((h * cos) + (w * sin))
-        
-        # Adjust translation
-        M[0, 2] += (new_w / 2) - center[0]
-        M[1, 2] += (new_h / 2) - center[1]
-        
-        rotated = cv2.warpAffine(shape, M, (new_w, new_h))
-        
-        # Crop to actual content bounds
-        piece_points = np.argwhere(rotated > 0)
-        if len(piece_points) == 0:
-            return rotated
-        
-        min_y, min_x = piece_points.min(axis=0)
-        max_y, max_x = piece_points.max(axis=0)
-        
-        # Crop to tight bounding box
-        cropped = rotated[min_y:max_y+1, min_x:max_x+1]
-        
-        return cropped
-
-    def _fine_tune_rotation(self,
-                        piece_id: int,
-                        piece_mask: np.ndarray,
-                        corner_pos: Tuple[float, float],
-                        initial_rotation: float,
-                        target: np.ndarray,
-                        search_range: int = 15,
-                        step: float = 1.0) -> CornerFit:
-        """Fine-tune rotation around the pre-calculated estimate."""
-
-        best_rotation = initial_rotation
-        best_score = -float('inf')
-        '''
-        # Search around initial rotation
-        angle = initial_rotation - search_range
-        end_angle = initial_rotation + search_range
-        
-        while angle <= end_angle:
-            # Rotate piece
-            rotated = self.corner_fitter._rotate_mask(piece_mask, float(angle))  # Cast to float
-            
-            # Place at corner
-            rendered = self.corner_fitter._render_at_position(rotated, corner_pos)
-            
-            # Score it
-            score = self.corner_fitter.score_corner_fit(rendered, target, 'bottom_right')
-            
-            if score > best_score:
-                best_score = score
-                best_rotation = float(angle)  # Cast to float
-            
-            angle += step
-        
-        print(f"    Fine-tuned: {initial_rotation:.1f}° → {best_rotation:.1f}° (Δ{best_rotation - initial_rotation:.1f}°)")
-        '''
-        return CornerFit(
-            piece_id=piece_id,
-            corner_position=corner_pos,
-            rotation=float(initial_rotation),  # Cast to float
-            score=float(best_score)  # Cast to float
-        )
-
-    def _generate_guesses_with_anchor(self,
-                                    anchor_fit: CornerFit,
-                                    remaining_piece_ids: List[int],
-                                    piece_shapes: Dict[int, np.ndarray],
-                                    target: np.ndarray,
-                                    max_guesses: int = 10) -> List[List[dict]]:
-        """
-        Generate guesses with one piece fixed as anchor.
-        Now uses TOP-LEFT corner positioning.
-        """
-        import random
-        
-        print(f"    Generating {max_guesses} guesses for {len(remaining_piece_ids)} pieces...")
-        
-        # Target IS the canvas
-        height, width = target.shape
-        
-        print(f"    Canvas size: {width}x{height}")
-        print(f"    Anchor piece {anchor_fit.piece_id} at ({anchor_fit.corner_position[0]:.0f}, {anchor_fit.corner_position[1]:.0f})")
-        
-        guesses = []
-        
-        for guess_num in range(max_guesses):
             guess = []
             
-            # Add ANCHORED piece first
-            guess.append({
-                'piece_id': anchor_fit.piece_id,
-                'x': anchor_fit.corner_position[0],
-                'y': anchor_fit.corner_position[1],
-                'theta': anchor_fit.rotation
-            })
+            # 1. Place corner pieces in corners
+            available_corners = corners[:len(corner_pieces)]
+            for piece, (corner_name, corner_x, corner_y, rotation_offset) in zip(shuffled_corners, available_corners):
+                piece_id = int(piece.id)
+                rotation = piece_rotations[piece_id] + rotation_offset
+                
+                rotated_mask = self._rotate_and_crop(piece_shapes[piece_id], rotation)
+                piece_h, piece_w = rotated_mask.shape
+                
+                # Calculate position
+                if corner_name == 'top_left':
+                    x, y = 0, 0
+                elif corner_name == 'top_right':
+                    x, y = width - piece_w, 0
+                elif corner_name == 'bottom_left':
+                    x, y = 0, height - piece_h
+                else:  # bottom_right
+                    x, y = width - piece_w, height - piece_h
+                
+                guess.append({
+                    'piece_id': piece_id,
+                    'x': float(x),
+                    'y': float(y),
+                    'theta': float(rotation)
+                })
             
-            # Place all remaining pieces randomly
-            for piece_id in remaining_piece_ids:
-                # Get piece dimensions at a random rotation
+            # 2. Place edge pieces on sides (one per side, deterministically)
+            # Assign each edge piece to a different side
+            available_sides = sides[:len(edge_pieces)]
+            
+            for piece, (side_name, base_x, base_y, rotation_offset) in zip(edge_pieces, available_sides):
+                piece_id = int(piece.id)
+                
+                # Use primary edge rotation + offset for this side
+                if piece.primary_edge_rotation is not None:
+                    rotation = piece.primary_edge_rotation + rotation_offset
+                else:
+                    rotation = rotation_offset
+                
+                # Apply rotation and get dimensions
+                rotated_mask = self._rotate_and_crop(piece_shapes[piece_id], rotation)
+                piece_h, piece_w = rotated_mask.shape
+                
+                # Calculate position based on side (centered on that side)
+                if side_name == 'bottom':
+                    x = (width - piece_w) / 2  # Center horizontally
+                    y = height - piece_h       # Flush with bottom
+                elif side_name == 'top':
+                    x = (width - piece_w) / 2  # Center horizontally
+                    y = 0                       # Flush with top
+                elif side_name == 'left':
+                    x = 0                       # Flush with left
+                    y = (height - piece_h) / 2  # Center vertically (middle height)
+                else:  # right
+                    x = width - piece_w         # Flush with right
+                    y = (height - piece_h) / 2  # Center vertically (middle height)
+                
+                guess.append({
+                    'piece_id': piece_id,
+                    'x': float(x),
+                    'y': float(y),
+                    'theta': float(rotation)
+                })
+            
+            # 3. Place center pieces randomly in interior
+            for piece in center_pieces:
+                piece_id = int(piece.id)
                 theta = random.choice([0, 90, 180, 270])
                 
-                # Rotate piece to get its dimensions
-                piece_mask = piece_shapes[piece_id]
-                rotated = self._rotate_and_crop(piece_mask, theta)
+                rotated = self._rotate_and_crop(piece_shapes[piece_id], theta)
                 piece_h, piece_w = rotated.shape
                 
-                # Random position, but ensure piece stays within bounds
-                # Top-left corner can be from 0 to (width - piece_w) horizontally
-                # and from 0 to (height - piece_h) vertically
                 max_x = max(0, width - piece_w)
                 max_y = max(0, height - piece_h)
                 
@@ -635,9 +432,38 @@ class IterativeSolver:
                     'theta': theta
                 })
             
-            # Sort by piece_id for consistency
-            guess.sort(key=lambda x: x['piece_id'])
+            guess.sort(key=lambda p: p['piece_id'])
             guesses.append(guess)
         
-        print(f"    ✓ Generated {len(guesses)} guesses")
         return guesses
+    
+    def _rotate_and_crop(self, shape: np.ndarray, angle: float) -> np.ndarray:
+        """Rotate and crop shape."""
+        if angle == 0:
+            return shape
+            
+        h, w = shape.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        
+        cos = np.abs(M[0, 0])
+        sin = np.abs(M[0, 1])
+        new_w = int((h * sin) + (w * cos))
+        new_h = int((h * cos) + (w * sin))
+        
+        M[0, 2] += (new_w / 2) - center[0]
+        M[1, 2] += (new_h / 2) - center[1]
+        
+        rotated = cv2.warpAffine(shape, M, (new_w, new_h))
+        
+        # Crop to content
+        piece_points = np.argwhere(rotated > 0)
+        if len(piece_points) == 0:
+            return rotated
+        
+        min_y, min_x = piece_points.min(axis=0)
+        max_y, max_x = piece_points.max(axis=0)
+        
+        cropped = rotated[min_y:max_y+1, min_x:max_x+1]
+        
+        return cropped
