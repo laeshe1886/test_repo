@@ -1,19 +1,14 @@
-#!/usr/bin/env python3
-"""
-PREN Puzzle Solver - Main Entry Point
-Orchestriert die gesamte Pipeline
-"""
-
 import sys
 from pathlib import Path
+
+from src.core.pipeline import PuzzlePipeline
+from src.core.config import Config
+from src.utils.logger import setup_logger
 
 # Projekt-Root zum Path hinzufügen
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from src.core.pipeline import PuzzlePipeline
-from src.core.config import Config
-from src.utils.logger import setup_logger
 
 def main():
     # Logger initialisieren
@@ -23,13 +18,9 @@ def main():
     logger.info("=" * 60)
     
     try:
-        # Konfiguration laden
+
         config = Config()
-        
-        # Pipeline erstellen
-        pipeline = PuzzlePipeline(config)
-        
-        # Pipeline ausführen
+        pipeline = PuzzlePipeline(config, show_ui=True)  # Enable UI
         result = pipeline.run()
         
         if result.success:
